@@ -1,11 +1,14 @@
 // Source: http://forums.novelnews.net/showpost.php?p=68778&postcount=18
 // Author: k-wng
 // License: unknown
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.util.Arrays;
+import java.util.zip.GZIPInputStream;
 
 public class Gpda {
     static final String CHARSET = "SJIS";
@@ -35,7 +38,7 @@ public class Gpda {
         return -1;
     }
 
-    void extractGpda(RandomAccessFile in, long offset, int size, String output, FileOutputStream datlist, String infostring, byte[] indexname) {
+    void extractGpda(RandomAccessFile in, long offset, int size, int compressionflags, String output, FileOutputStream datlist, String infostring, byte[] indexname) {
         try {
             byte[] buffer = new byte[4];
             in.seek(offset);
@@ -45,21 +48,24 @@ public class Gpda {
                 int filecount,namesize,sameNum;
                 int[] filesizes, nameoffsets;
                 long filesize;
-                long[] fileoffsets;
+                int[] fileoffsets;
+                int[] filecompressions;
                 String[] filelist;
                 byte[][] indexnames;
                 String filename;
 
                 filesize = Long.reverseBytes(in.readLong());
                 filecount = Integer.reverseBytes(in.readInt());
-                fileoffsets = new long[filecount];
+                fileoffsets = new int[filecount];
+                filecompressions = new int[filecount];
                 filesizes = new int[filecount];
                 nameoffsets = new int[filecount];
                 filelist = new String[filecount];
                 indexnames = new byte[filecount][];
 
                 for (int i=0; i<filecount; i++) {
-                    fileoffsets[i] = Long.reverseBytes(in.readLong());
+                    fileoffsets[i] = Integer.reverseBytes(in.readInt());
+                    filecompressions[i] = Integer.reverseBytes(in.readInt());
                     filesizes[i] = Integer.reverseBytes(in.readInt());
                     nameoffsets[i] = Integer.reverseBytes(in.readInt());
                 }
@@ -81,41 +87,39 @@ public class Gpda {
                     sameNum = findDupName(i, filelist[i], filelist);
                     filename = output+"/"+filelist[i].trim();
                     if (sameNum > 0) {
-                        extractGpda(in, fileoffsets[i]+offset, filesizes[i], filename+"_"+sameNum, datlist, sameNum+","+output+"/", indexnames[i]);
+                        extractGpda(in, fileoffsets[i]+offset, filesizes[i], filecompressions[i], filename+"_"+sameNum, datlist, sameNum+","+output+"/", indexnames[i]);
                     } else {
-                        extractGpda(in, fileoffsets[i]+offset, filesizes[i], filename, datlist, ","+output+"/", indexnames[i]);
+                        extractGpda(in, fileoffsets[i]+offset, filesizes[i], filecompressions[i], filename, datlist, ","+output+"/", indexnames[i]);
                     }
                 }
             } else if (offset==0) {
                 System.out.println("not a GPDA file");
-            } else if (gzip && Arrays.equals(GZIP_SIG,buffer)) {
+            } else if (compressionflags == 1 && Arrays.equals(GZIP_SIG,buffer)) {
+                System.out.println("compressed: " + output);
                 int read;
-                String filename = output;
-                FileOutputStream out;
                 if (output.endsWith(".gz")) {
                     datlist.write(("g"+infostring).getBytes());
-                    datlist.write(indexname);
-                    datlist.write("\r\n".getBytes());
                 } else {
-                    filename = output+".gz";
                     datlist.write(("e"+infostring).getBytes());
-                    datlist.write(indexname);
-                    datlist.write("\r\n".getBytes());
                 }
+                datlist.write(indexname);
+                datlist.write("\r\n".getBytes());
                 in.seek(offset);
-                buffer = new byte[FILE_BUFFER_SIZE];
-                out = new FileOutputStream(filename);
-                for (int r=0;r<size;r+=read) {
-                    read = in.read(buffer, 0, Math.min(FILE_BUFFER_SIZE,size-r));
-                    if (read <= 0) {
-                        return;
-                    }
-                    out.write(buffer, 0, read);
+                buffer = new byte[size];
+                read = in.read(buffer, 0, size);
+                if (read < size) {
+                    return;
                 }
-                out.close();
-                System.out.println("Extracting: "+filename);
-                Runtime.getRuntime().exec(new String[] {"gzip", "-df", filename});
-                //does not wait for and check if extracted file is a gpda file
+                try (
+                    GZIPInputStream gzin = new GZIPInputStream(
+                        new ByteArrayInputStream(buffer));
+                    BufferedOutputStream out = new BufferedOutputStream(
+                        new FileOutputStream(output));
+                ) {
+                    for (int c = gzin.read(); c != -1; c = gzin.read()) {
+                        out.write(c);
+                    }
+                }
             } else {
                 int read;
                 FileOutputStream out;
@@ -279,7 +283,7 @@ public class Gpda {
 
         for (byte[] byteline=readLine(datlist);byteline!=null;byteline=readLine(datlist)) {
             String line = new String(byteline, CHARSET);
-			//System.out.println(line);
+            //System.out.println(line);
             cs = line.indexOf(',');
             ls = line.lastIndexOf('/');
             id = line.substring(0, cs);
@@ -301,15 +305,15 @@ public class Gpda {
     long writeGpda(RandomAccessFile out, long offset, FileInputStream datlist) {
         try {
             byte[] l = readLine(datlist);
-			String line = new String(l);
+            String line = new String(l);
             System.out.println(line);
-			if (line.startsWith("d,")) {
+            if (line.startsWith("d,")) {
                 String name = line.substring(2);
                 Node start = new Node(null, "d", name.getBytes(),"",0);
                 readDatlist(datlist, start);
                 return _writeGpdaWithTxt(out, offset, start.child);
             } else {
-				System.out.println("failed");
+                System.out.println("failed");
                 return -1;
             }
         } catch (Exception e) {
@@ -321,12 +325,12 @@ public class Gpda {
     long _writeGpdaWithTxt(RandomAccessFile out, long offset, Node filelist) {
         long written_bytes = 0;
         try {
-			System.out.println("_writeGpdaWithTxt");
+            System.out.println("_writeGpdaWithTxt");
             int filecount = 0;
             for (Node c=filelist;c != null; c=c.next) {
                 filecount++;
             }
-			System.out.println(filecount);
+            System.out.println(filecount);
             byte[][] list = new byte[filecount][];
             int t=0;
             for (Node c=filelist;c != null; c=c.next) {
@@ -391,7 +395,7 @@ public class Gpda {
         try {
             File f = new File(file);
             if (f.isDirectory()) {
-            } else if (file.endsWith(".dat.txt")) {
+            } else if (file.toUpperCase().endsWith(".dat.txt")) {
                 FileInputStream datlist = new FileInputStream(file);
                 String filename = file.substring(0, file.length()-8);
                 f = new File(filename+".dat");
@@ -405,11 +409,11 @@ public class Gpda {
                     out.writeByte(0);
                 }
                 out.close();
-            } else if (file.endsWith(".dat")) {
+            } else if (file.toUpperCase().endsWith(".DAT")) {
                 RandomAccessFile in = new RandomAccessFile(f, "r");
                 FileOutputStream datlist = new FileOutputStream(file+".txt");
                 String name = file.substring(0, file.length()-4);
-                extractGpda(in, 0, 0, name, datlist, ",", name.getBytes());
+                extractGpda(in, 0, 0, 0, name, datlist, ",", name.getBytes());
                 in.close();
                 datlist.close();
             }
